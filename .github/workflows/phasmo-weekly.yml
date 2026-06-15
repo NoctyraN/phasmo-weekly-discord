@@ -44,4 +44,4 @@ jobs:
         if: steps.timecheck.outputs.run_post == 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: node scripts/phasmo-weekly.js
+        run: node .github/phasmo-weekly.js
