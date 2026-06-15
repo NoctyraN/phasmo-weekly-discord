@@ -28,13 +28,13 @@ jobs:
 
       - name: Checkout repository
         if: steps.timecheck.outputs.run_post == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
         if: steps.timecheck.outputs.run_post == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Install dependencies
         if: steps.timecheck.outputs.run_post == 'true'
