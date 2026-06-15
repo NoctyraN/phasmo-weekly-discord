@@ -1,6 +1,7 @@
 const cheerio = require("cheerio");
 
 const WIKI_URL = "https://phasmophobia.fandom.com/wiki/Challenge_Mode";
+const API_URL = "https://phasmophobia.fandom.com/api.php?action=parse&page=Challenge_Mode&prop=text&format=json";
 const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
 
 if (!webhookUrl) {
@@ -23,7 +24,6 @@ function truncate(text, maxLength) {
 
 async function translateToGerman(text) {
   const cleaned = cleanText(text);
-
   if (!cleaned) return "";
 
   try {
@@ -34,7 +34,7 @@ async function translateToGerman(text) {
 
     const response = await fetch(url, {
       headers: {
-        "User-Agent": "phasmo-weekly-discord-bot/1.0"
+        "User-Agent": "Mozilla/5.0"
       }
     });
 
@@ -95,33 +95,13 @@ function extractChallengeRows($) {
       .find("tbody tr")
       .each((_, row) => {
         const cells = $(row).find("td");
-        if (cells.length < 4) return;
+        if (cells.length < 6) return;
 
-        const cellTexts = cells
-          .map((_, cell) => cleanText($(cell).text()))
-          .get();
-
-        let number = "";
-        let challenge = "";
-        let description = "";
-        let details = "";
-        let map = "";
-        let eventDates = "";
-
-        if (cellTexts.length >= 6) {
-          number = cellTexts[1];
-          challenge = cellTexts[2];
-          description = cellTexts[3];
-          details = cellTexts[4];
-          map = cellTexts[5];
-          eventDates = cellTexts[6] || "";
-        } else if (cellTexts.length >= 5) {
-          challenge = cellTexts[1] || cellTexts[0];
-          description = cellTexts[2] || "";
-          details = cellTexts[3] || "";
-          map = cellTexts[4] || "";
-          eventDates = cellTexts[5] || "";
-        }
+        const number = cleanText($(cells[1]).text());
+        const challenge = cleanText($(cells[2]).text());
+        const description = cleanText($(cells[3]).text());
+        const details = cleanText($(cells[4]).text());
+        const map = cleanText($(cells[5]).text());
 
         if (!challenge || !description || !map) return;
 
@@ -130,8 +110,7 @@ function extractChallengeRows($) {
           challenge,
           description,
           details,
-          map,
-          eventDates
+          map
         });
       });
   });
@@ -140,17 +119,23 @@ function extractChallengeRows($) {
 }
 
 async function main() {
-  const pageResponse = await fetch(WIKI_URL, {
+  const apiResponse = await fetch(API_URL, {
     headers: {
-      "User-Agent": "phasmo-weekly-discord-bot/1.0"
+      "User-Agent": "Mozilla/5.0"
     }
   });
 
-  if (!pageResponse.ok) {
-    throw new Error(`Wiki konnte nicht geladen werden: ${pageResponse.status}`);
+  if (!apiResponse.ok) {
+    throw new Error(`Wiki API konnte nicht geladen werden: ${apiResponse.status}`);
   }
 
-  const html = await pageResponse.text();
+  const apiData = await apiResponse.json();
+
+  if (!apiData.parse || !apiData.parse.text || !apiData.parse.text["*"]) {
+    throw new Error("Wiki API hat keinen nutzbaren Inhalt geliefert.");
+  }
+
+  const html = apiData.parse.text["*"];
   const $ = cheerio.load(html);
 
   const currentChallengeName = findCurrentChallengeName($);
@@ -172,13 +157,14 @@ async function main() {
   const germanTitle = await translateToGerman(currentChallenge.challenge);
   const germanDescription = await translateToGerman(currentChallenge.description);
   const germanDetails = await translateToGerman(currentChallenge.details);
-  const germanMap = await translateToGerman(currentChallenge.map);
 
   const nowGerman = new Date().toLocaleString("de-DE", {
     timeZone: "Europe/Berlin",
     dateStyle: "full",
     timeStyle: "short"
   });
+
+  const detailsText = germanDetails || "Keine zusätzlichen Details gefunden.";
 
   const embed = {
     title: `👻 Weekly Challenge: ${truncate(germanTitle, 180)}`,
@@ -195,7 +181,7 @@ async function main() {
       },
       {
         name: "🗺️ Map",
-        value: truncate(germanMap, 250) || truncate(currentChallenge.map, 250) || "Unbekannt",
+        value: truncate(currentChallenge.map, 250) || "Unbekannt",
         inline: true
       },
       {
@@ -205,7 +191,7 @@ async function main() {
       },
       {
         name: "📋 Details",
-        value: truncate(germanDetails || "Keine zusätzlichen Details gefunden.", 900),
+        value: truncate(detailsText, 900),
         inline: false
       },
       {
