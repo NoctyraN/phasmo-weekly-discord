@@ -1,0 +1,42 @@
+name: Phasmophobia Weekly Discord Post
+
+on:
+  schedule:
+    # Sommerzeit Deutschland: Montag 13:15 = 11:15 UTC
+    - cron: "15 11 * * 1"
+
+    # Winterzeit Deutschland: Montag 13:15 = 12:15 UTC
+    - cron: "15 12 * * 1"
+
+  workflow_dispatch:
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check German time
+        id: timecheck
+        run: |
+          HOUR=$(TZ=Europe/Berlin date +%H)
+          DAY=$(TZ=Europe/Berlin date +%u)
+
+          echo "German day: $DAY"
+          echo "German hour: $HOUR"
+
+          if [ "$DAY" = "1" ] && [ "$HOUR" = "13" ]; then
+            echo "run_post=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_post=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post to Discord
+        if: steps.timecheck.outputs.run_post == 'true'
+        run: |
+          curl -H "Content-Type: application/json" \
+          -X POST \
+          -d '{
+            "username": "Phasmo Weekly",
+            "content": "👻 **Neue Phasmophobia Weekly Challenge ist da!**\n\nDie neue wöchentliche Aufgabe ist online.\n\n🔗 https://phasmophobia.fandom.com/wiki/Challenge_Mode"
+          }' \
+          "${{ secrets.DISCORD_WEBHOOK_URL }}"
