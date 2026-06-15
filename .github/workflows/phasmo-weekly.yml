@@ -24,7 +24,9 @@ jobs:
           echo "German day: $DAY"
           echo "German hour: $HOUR"
 
-          if [ "$DAY" = "1" ] && [ "$HOUR" = "13" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run_post=true" >> "$GITHUB_OUTPUT"
+          elif [ "$DAY" = "1" ] && [ "$HOUR" = "13" ]; then
             echo "run_post=true" >> "$GITHUB_OUTPUT"
           else
             echo "run_post=false" >> "$GITHUB_OUTPUT"
@@ -37,6 +39,6 @@ jobs:
           -X POST \
           -d '{
             "username": "Phasmo Weekly",
-            "content": "👻 **Neue Phasmophobia Weekly Challenge ist da!**\n\nDie neue wöchentliche Aufgabe ist online.\n\n🔗 https://phasmophobia.fandom.com/wiki/Challenge_Mode"
+            "content": "👻 **Neue Phasmophobia Weekly Challenge ist da!**\n\nDie neue wöchentliche Aufgabe wurde aktualisiert.\n\n📌 Die Wiki-Seite ist auf Englisch, enthält aber immer die aktuellen Infos zu:\n• Challenge-Name\n• Map\n• Ausrüstung\n• Regeln\n• Belohnung\n\n🔗 https://phasmophobia.fandom.com/wiki/Challenge_Mode"
           }' \
           "${{ secrets.DISCORD_WEBHOOK_URL }}"
