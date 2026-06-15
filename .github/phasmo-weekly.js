@@ -8,6 +8,8 @@ if (!webhookUrl) {
   throw new Error("DISCORD_WEBHOOK_URL fehlt.");
 }
 
+const translationCache = new Map();
+
 function cleanText(text) {
   return String(text || "")
     .replace(/\s+/g, " ")
@@ -25,6 +27,10 @@ function truncate(text, maxLength) {
 async function translateToGerman(text) {
   const cleaned = cleanText(text);
   if (!cleaned) return "";
+
+  if (translationCache.has(cleaned)) {
+    return translationCache.get(cleaned);
+  }
 
   try {
     const url =
@@ -44,18 +50,22 @@ async function translateToGerman(text) {
 
     const data = await response.json();
 
-    return data[0]
+    const translated = data[0]
       .map(part => part[0])
       .join("")
       .trim();
+
+    translationCache.set(cleaned, translated);
+    return translated;
   } catch (error) {
     console.log("Übersetzung fehlgeschlagen, nutze Original:", error.message);
+    translationCache.set(cleaned, cleaned);
     return cleaned;
   }
 }
 
 function findCurrentChallengeName($) {
-  const pageText = cleanText($("body").text());
+  const pageText = cleanText($.root().text());
 
   const patterns = [
     /As of .*?\(UTC\), the challenge is ([^.]+)\./i,
@@ -72,8 +82,8 @@ function findCurrentChallengeName($) {
   return null;
 }
 
-function extractChallengeRows($) {
-  const rows = [];
+function getChallengeTables($) {
+  const challengeTables = [];
 
   $("table").each((_, table) => {
     const headers = [];
@@ -91,31 +101,69 @@ function extractChallengeRows($) {
 
     if (!looksLikeChallengeTable) return;
 
-    $(table)
-      .find("tbody tr")
-      .each((_, row) => {
-        const cells = $(row).find("td");
-        if (cells.length < 6) return;
-
-        const number = cleanText($(cells[1]).text());
-        const challenge = cleanText($(cells[2]).text());
-        const description = cleanText($(cells[3]).text());
-        const details = cleanText($(cells[4]).text());
-        const map = cleanText($(cells[5]).text());
-
-        if (!challenge || !description || !map) return;
-
-        rows.push({
-          number,
-          challenge,
-          description,
-          details,
-          map
-        });
-      });
+    challengeTables.push(table);
   });
 
+  return challengeTables;
+}
+
+function extractStandardChallenges($, table) {
+  const rows = [];
+
+  $(table)
+    .find("tbody tr")
+    .each((_, row) => {
+      const cells = $(row).find("td");
+      if (cells.length < 6) return;
+
+      const number = cleanText($(cells[1]).text());
+      const challenge = cleanText($(cells[2]).text());
+      const description = cleanText($(cells[3]).text());
+      const details = cleanText($(cells[4]).text());
+      const map = cleanText($(cells[5]).text());
+
+      if (!number || !challenge || !description || !map) return;
+
+      rows.push({
+        number,
+        challenge,
+        description,
+        details,
+        map
+      });
+    });
+
   return rows;
+}
+
+function splitIntoChunks(items, chunkSize) {
+  const chunks = [];
+
+  for (let i = 0; i < items.length; i += chunkSize) {
+    chunks.push(items.slice(i, i + chunkSize));
+  }
+
+  return chunks;
+}
+
+async function buildRotationList(challenges) {
+  const lines = [];
+
+  for (const challenge of challenges) {
+    const germanName = await translateToGerman(challenge.challenge);
+
+    if (challenge.isCurrent) {
+      lines.push(
+        `🔥 **${challenge.number}. ${truncate(germanName, 60)}** — ${truncate(challenge.map, 60)} **← AKTUELL**`
+      );
+    } else {
+      lines.push(
+        `👻 **${challenge.number}. ${truncate(germanName, 60)}** — ${truncate(challenge.map, 60)}`
+      );
+    }
+  }
+
+  return lines;
 }
 
 async function main() {
@@ -139,24 +187,36 @@ async function main() {
   const $ = cheerio.load(html);
 
   const currentChallengeName = findCurrentChallengeName($);
+  const challengeTables = getChallengeTables($);
 
   if (!currentChallengeName) {
     throw new Error("Aktuelle Challenge konnte nicht erkannt werden.");
   }
 
-  const challengeRows = extractChallengeRows($);
-
-  const currentChallenge = challengeRows.find(row =>
-    row.challenge.toLowerCase() === currentChallengeName.toLowerCase()
-  );
-
-  if (!currentChallenge) {
-    throw new Error(`Challenge "${currentChallengeName}" wurde nicht in der Tabelle gefunden.`);
+  if (challengeTables.length < 1) {
+    throw new Error("Keine Challenge-Tabelle gefunden.");
   }
 
-  const germanTitle = await translateToGerman(currentChallenge.challenge);
-  const germanDescription = await translateToGerman(currentChallenge.description);
-  const germanDetails = await translateToGerman(currentChallenge.details);
+  const standardChallenges = extractStandardChallenges($, challengeTables[0]);
+
+  if (standardChallenges.length === 0) {
+    throw new Error("Keine Standard Challenges gefunden.");
+  }
+
+  for (const challenge of standardChallenges) {
+    challenge.isCurrent =
+      challenge.challenge.toLowerCase() === currentChallengeName.toLowerCase();
+  }
+
+  const currentChallenge =
+    standardChallenges.find(challenge => challenge.isCurrent) || standardChallenges[0];
+
+  const germanCurrentName = await translateToGerman(currentChallenge.challenge);
+  const germanCurrentDescription = await translateToGerman(currentChallenge.description);
+  const germanCurrentDetails = await translateToGerman(currentChallenge.details);
+
+  const rotationLines = await buildRotationList(standardChallenges);
+  const rotationChunks = splitIntoChunks(rotationLines, 13);
 
   const nowGerman = new Date().toLocaleString("de-DE", {
     timeZone: "Europe/Berlin",
@@ -164,51 +224,66 @@ async function main() {
     timeStyle: "short"
   });
 
-  const detailsText = germanDetails || "Keine zusätzlichen Details gefunden.";
-
-  const embed = {
-    title: `👻 Weekly Challenge: ${truncate(germanTitle, 180)}`,
-    url: WIKI_URL,
-    description:
-      `**${truncate(germanDescription, 350)}**\n\n` +
-      `🎯 Schließt die wöchentliche Challenge im Challenge Mode auf der angegebenen Map ab.`,
-    color: 0x7b2cff,
-    fields: [
-      {
-        name: "🧾 Originalname",
-        value: truncate(currentChallenge.challenge, 250) || "Unbekannt",
-        inline: true
-      },
-      {
-        name: "🗺️ Map",
-        value: truncate(currentChallenge.map, 250) || "Unbekannt",
-        inline: true
-      },
-      {
-        name: "💰 Belohnung",
-        value: "$5.000 + 5.000 XP",
-        inline: true
-      },
-      {
-        name: "📋 Details",
-        value: truncate(detailsText, 900),
-        inline: false
-      },
-      {
-        name: "🔗 Quelle",
-        value: `[Phasmophobia Wiki öffnen](${WIKI_URL})`,
-        inline: false
+  const embeds = [
+    {
+      title: `👻 Aktuelle Weekly Challenge: ${truncate(germanCurrentName, 180)}`,
+      url: WIKI_URL,
+      description:
+        `🔥 **Diese Aufgabe ist diese Woche dran!**\n\n` +
+        `**${truncate(germanCurrentDescription, 500)}**\n\n` +
+        `🎯 Schließt die wöchentliche Challenge im Challenge Mode auf der angegebenen Map ab.`,
+      color: 0x7b2cff,
+      fields: [
+        {
+          name: "🧾 Originalname",
+          value: truncate(currentChallenge.challenge, 250),
+          inline: true
+        },
+        {
+          name: "🗺️ Map",
+          value: truncate(currentChallenge.map, 250),
+          inline: true
+        },
+        {
+          name: "💰 Belohnung",
+          value: "$5.000 + 5.000 XP",
+          inline: true
+        },
+        {
+          name: "📋 Details",
+          value: truncate(germanCurrentDetails || "Keine zusätzlichen Details gefunden.", 950),
+          inline: false
+        }
+      ],
+      footer: {
+        text: `Automatisch ausgelesen und übersetzt • ${nowGerman}`
       }
-    ],
-    footer: {
-      text: `Automatisch ausgelesen und übersetzt • ${nowGerman}`
     }
-  };
+  ];
+
+  rotationChunks.forEach((chunk, index) => {
+    embeds.push({
+      title:
+        index === 0
+          ? "📜 Komplette 26er Standard-Challenge-Rotation"
+          : "📜 Standard-Challenge-Rotation Fortsetzung",
+      description: chunk.join("\n"),
+      color: 0x2f80ed
+    });
+  });
+
+  embeds.push({
+    title: "🔗 Quelle",
+    description: `[Phasmophobia Wiki öffnen](${WIKI_URL})`,
+    color: 0x444444
+  });
 
   const payload = {
     username: "Phasmo Weekly",
-    content: "👻 **Die neue Phasmophobia Weekly Challenge ist da!**",
-    embeds: [embed],
+    content:
+      "👻 **Phasmophobia Weekly Challenge Update**\n" +
+      "Oben steht die aktuelle Wochenaufgabe, unten die komplette 26er-Rotation.",
+    embeds,
     allowed_mentions: {
       parse: []
     }
@@ -227,7 +302,9 @@ async function main() {
     throw new Error(`Discord Fehler: ${discordResponse.status} ${errorText}`);
   }
 
-  console.log(`Gepostet: ${currentChallenge.challenge} → ${germanTitle}`);
+  console.log(
+    `Gepostet: Aktuell ${currentChallenge.challenge}, insgesamt ${standardChallenges.length} Standard Challenges.`
+  );
 }
 
 main().catch(error => {
