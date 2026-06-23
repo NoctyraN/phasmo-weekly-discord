@@ -2,46 +2,50 @@ name: Phasmophobia Weekly Discord Post
 
 on:
   schedule:
-    - cron: "15 11 * * 1"
-    - cron: "15 12 * * 1"
+    # GitHub läuft nach Zeitplan. Mehrere Versuche am Montag,
+    # damit es zuverlässiger ist, falls GitHub einen Lauf verzögert oder auslässt.
+    # Das Script selbst postet nur einmal pro Montag.
+    - cron: "15,45 13,14,15,16 * * 1"
 
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: phasmo-weekly-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   post:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check German time
-        id: timecheck
-        run: |
-          HOUR=$(TZ=Europe/Berlin date +%H)
-          DAY=$(TZ=Europe/Berlin date +%u)
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "run_post=true" >> "$GITHUB_OUTPUT"
-          elif [ "$DAY" = "1" ] && [ "$HOUR" = "13" ]; then
-            echo "run_post=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run_post=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Checkout repository
-        if: steps.timecheck.outputs.run_post == 'true'
         uses: actions/checkout@v5
 
       - name: Setup Node.js
-        if: steps.timecheck.outputs.run_post == 'true'
         uses: actions/setup-node@v5
         with:
           node-version: 24
 
       - name: Install dependencies
-        if: steps.timecheck.outputs.run_post == 'true'
-        run: npm install cheerio
+        run: npm install cheerio --no-save
 
       - name: Post weekly challenge to Discord
-        if: steps.timecheck.outputs.run_post == 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: node .github/phasmo-weekly.js
+
+      - name: Save weekly post state
+        run: |
+          if [ -n "$(git status --porcelain .github/phasmo-state.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .github/phasmo-state.json
+            git commit -m "Update Phasmo weekly post state [skip ci]"
+            git push
+          else
+            echo "No state changes to commit."
+          fi
