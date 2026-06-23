@@ -62,8 +62,6 @@ function shouldScheduledRunPostNow() {
   const berlin = getBerlinDateParts();
 
   const isMonday = berlin.weekday === "Mon";
-  const isAfter15 = berlin.hour >= 15;
-  const isBefore19 = berlin.hour < 19;
 
   if (!isMonday) {
     console.log("Kein Montag in Deutschland. Es wird nicht gepostet.");
