@@ -1,19 +1,22 @@
-const fs = require("fs");
-const path = require("path");
 const cheerio = require("cheerio");
 
-const WIKI_URL = "https://phasmophobia.fandom.com/wiki/Challenge_Mode";
-const API_URL = "https://phasmophobia.fandom.com/api.php?action=parse&page=Challenge_Mode&prop=text&format=json";
-const STATE_PATH = path.join(__dirname, "phasmo-state.json");
+const WIKI_URL =
+  "https://phasmophobia.fandom.com/wiki/Challenge_Mode";
+
+const API_URL =
+  "https://phasmophobia.fandom.com/api.php?action=parse&page=Challenge_Mode&prop=text&format=json";
 
 const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
-const isManualRun = process.env.GITHUB_EVENT_NAME === "workflow_dispatch";
 
 if (!webhookUrl) {
   throw new Error("DISCORD_WEBHOOK_URL fehlt.");
 }
 
 const translationCache = new Map();
+
+const fixedTranslations = new Map([
+  ["Tag! You're it!", "Fangen! Du bist dran!"]
+]);
 
 function cleanText(text) {
   return String(text || "")
@@ -25,97 +28,76 @@ function cleanText(text) {
 
 function truncate(text, maxLength) {
   const cleaned = cleanText(text);
-  if (cleaned.length <= maxLength) return cleaned;
+
+  if (cleaned.length <= maxLength) {
+    return cleaned;
+  }
+
   return cleaned.slice(0, maxLength - 3).trim() + "...";
 }
 
-function getBerlinDateParts() {
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/Berlin",
-    weekday: "short",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23"
-  });
-
-  const parts = Object.fromEntries(
-    formatter.formatToParts(new Date()).map(part => [part.type, part.value])
-  );
-
-  return {
-    weekday: parts.weekday,
-    year: parts.year,
-    month: parts.month,
-    day: parts.day,
-    hour: Number(parts.hour),
-    minute: Number(parts.minute),
-    dateKey: `${parts.year}-${parts.month}-${parts.day}`
-  };
-}
-
+/*
+ * Die Zeitsteuerung übernimmt ausschließlich die Workflow-Datei.
+ * Deshalb gibt es hier keine zusätzliche Uhrzeitprüfung.
+ */
 function shouldScheduledRunPostNow() {
-  if (isManualRun) return true;
-
-  const berlin = getBerlinDateParts();
-
-  const isMonday = berlin.weekday === "Mon";
-
-  if (!isMonday) {
-    console.log("Kein Montag in Deutschland. Es wird nicht gepostet.");
-    return false;
-  }
-
-  if (!isAfter15 || !isBefore19) {
-    console.log(`Außerhalb des deutschen Posting-Fensters. Aktuelle Stunde: ${berlin.hour}`);
-    return false;
-  }
-
   return true;
 }
 
-function readState() {
-  try {
-    if (!fs.existsSync(STATE_PATH)) {
-      return {};
+async function fetchWithRetry(url, options = {}, attempts = 3) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const response = await fetch(url, options);
+
+      if (response.ok) {
+        return response;
+      }
+
+      lastError = new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
     }
 
-    return JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
-  } catch (error) {
-    console.log("State konnte nicht gelesen werden, starte ohne State:", error.message);
-    return {};
+    if (attempt < attempts) {
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
   }
-}
 
-function writeState(state) {
-  fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2) + "\n", "utf8");
+  throw lastError;
 }
 
 async function translateToGerman(text) {
   const cleaned = cleanText(text);
-  if (!cleaned) return "";
+
+  if (!cleaned) {
+    return "";
+  }
+
+  if (fixedTranslations.has(cleaned)) {
+    return fixedTranslations.get(cleaned);
+  }
 
   if (translationCache.has(cleaned)) {
     return translationCache.get(cleaned);
   }
 
   try {
-    const url =
+    const translateUrl =
       "https://translate.googleapis.com/translate_a/single" +
       "?client=gtx&sl=en&tl=de&dt=t&q=" +
       encodeURIComponent(cleaned);
 
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0"
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error(`Translate HTTP ${response.status}`);
-    }
+    const response = await fetchWithRetry(
+      translateUrl,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0"
+        }
+      },
+      2
+    );
 
     const data = await response.json();
 
@@ -125,10 +107,16 @@ async function translateToGerman(text) {
       .trim();
 
     translationCache.set(cleaned, translated);
+
     return translated;
   } catch (error) {
-    console.log("Übersetzung fehlgeschlagen, nutze Original:", error.message);
+    console.log(
+      "Übersetzung fehlgeschlagen, nutze Original:",
+      error.message
+    );
+
     translationCache.set(cleaned, cleaned);
+
     return cleaned;
   }
 }
@@ -143,6 +131,7 @@ function findCurrentChallengeName($) {
 
   for (const pattern of patterns) {
     const match = pageText.match(pattern);
+
     if (match && match[1]) {
       return cleanText(match[1]);
     }
@@ -152,38 +141,43 @@ function findCurrentChallengeName($) {
 }
 
 function getChallengeTables($) {
-  const challengeTables = [];
+  const tables = [];
 
   $("table").each((_, table) => {
     const headers = [];
 
     $(table)
       .find("th")
-      .each((_, th) => {
-        headers.push(cleanText($(th).text()).toLowerCase());
+      .each((_, heading) => {
+        headers.push(
+          cleanText($(heading).text()).toLowerCase()
+        );
       });
 
-    const looksLikeChallengeTable =
-      headers.some(h => h.includes("challenge")) &&
-      headers.some(h => h.includes("description")) &&
-      headers.some(h => h.includes("map"));
+    const isChallengeTable =
+      headers.some(header => header.includes("challenge")) &&
+      headers.some(header => header.includes("description")) &&
+      headers.some(header => header.includes("map"));
 
-    if (!looksLikeChallengeTable) return;
-
-    challengeTables.push(table);
+    if (isChallengeTable) {
+      tables.push(table);
+    }
   });
 
-  return challengeTables;
+  return tables;
 }
 
 function extractStandardChallenges($, table) {
-  const rows = [];
+  const challenges = [];
 
   $(table)
     .find("tbody tr")
     .each((_, row) => {
       const cells = $(row).find("td");
-      if (cells.length < 6) return;
+
+      if (cells.length < 6) {
+        return;
+      }
 
       const number = cleanText($(cells[1]).text());
       const challenge = cleanText($(cells[2]).text());
@@ -191,9 +185,11 @@ function extractStandardChallenges($, table) {
       const details = cleanText($(cells[4]).text());
       const map = cleanText($(cells[5]).text());
 
-      if (!number || !challenge || !description || !map) return;
+      if (!number || !challenge || !description || !map) {
+        return;
+      }
 
-      rows.push({
+      challenges.push({
         number,
         challenge,
         description,
@@ -202,17 +198,20 @@ function extractStandardChallenges($, table) {
       });
     });
 
-  return rows;
+  return challenges;
 }
 
 function extractSpecialChallenges($, table) {
-  const rows = [];
+  const challenges = [];
 
   $(table)
     .find("tbody tr")
     .each((_, row) => {
       const cells = $(row).find("td");
-      if (cells.length < 6) return;
+
+      if (cells.length < 6) {
+        return;
+      }
 
       const challenge = cleanText($(cells[1]).text());
       const description = cleanText($(cells[2]).text());
@@ -220,9 +219,11 @@ function extractSpecialChallenges($, table) {
       const map = cleanText($(cells[4]).text());
       const eventDates = cleanText($(cells[5]).text());
 
-      if (!challenge || !description || !map) return;
+      if (!challenge || !description || !map) {
+        return;
+      }
 
-      rows.push({
+      challenges.push({
         challenge,
         description,
         details,
@@ -231,14 +232,14 @@ function extractSpecialChallenges($, table) {
       });
     });
 
-  return rows;
+  return challenges;
 }
 
 function splitIntoChunks(items, chunkSize) {
   const chunks = [];
 
-  for (let i = 0; i < items.length; i += chunkSize) {
-    chunks.push(items.slice(i, i + chunkSize));
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
   }
 
   return chunks;
@@ -248,15 +249,18 @@ async function buildRotationList(challenges) {
   const lines = [];
 
   for (const challenge of challenges) {
-    const germanName = await translateToGerman(challenge.challenge);
+    const germanName =
+      await translateToGerman(challenge.challenge);
 
     if (challenge.isCurrent) {
       lines.push(
-        `🔥 **${challenge.number}. ${truncate(germanName, 60)}** — ${truncate(challenge.map, 60)} **← AKTUELL**`
+        `🔥 **${challenge.number}. ${truncate(germanName, 60)}**` +
+        ` — ${truncate(challenge.map, 60)} **← AKTUELL**`
       );
     } else {
       lines.push(
-        `👻 **${challenge.number}. ${truncate(germanName, 60)}** — ${truncate(challenge.map, 60)}`
+        `👻 **${challenge.number}. ${truncate(germanName, 60)}**` +
+        ` — ${truncate(challenge.map, 60)}`
       );
     }
   }
@@ -268,9 +272,16 @@ async function buildSpecialList(challenges) {
   const lines = [];
 
   for (const challenge of challenges) {
-    const germanName = await translateToGerman(challenge.challenge);
+    const germanName =
+      await translateToGerman(challenge.challenge);
+
     lines.push(
-      `🎃 **${truncate(germanName, 60)}** — ${truncate(challenge.map, 60)} | ${truncate(challenge.eventDates || "Event-Zeitraum unbekannt", 80)}`
+      `🎃 **${truncate(germanName, 60)}**` +
+      ` — ${truncate(challenge.map, 60)}` +
+      ` | ${truncate(
+        challenge.eventDates || "Event-Zeitraum unbekannt",
+        80
+      )}`
     );
   }
 
@@ -278,23 +289,30 @@ async function buildSpecialList(challenges) {
 }
 
 async function loadWikiHtml() {
-  const apiResponse = await fetch(API_URL, {
-    headers: {
-      "User-Agent": "Mozilla/5.0"
-    }
-  });
+  const response = await fetchWithRetry(
+    API_URL,
+    {
+      headers: {
+        "User-Agent":
+          "PhasmoWeeklyDiscordBot/1.0 (GitHub Actions)"
+      }
+    },
+    3
+  );
 
-  if (!apiResponse.ok) {
-    throw new Error(`Wiki API konnte nicht geladen werden: ${apiResponse.status}`);
+  const data = await response.json();
+
+  if (
+    !data.parse ||
+    !data.parse.text ||
+    !data.parse.text["*"]
+  ) {
+    throw new Error(
+      "Die Wiki-API hat keinen nutzbaren Inhalt geliefert."
+    );
   }
 
-  const apiData = await apiResponse.json();
-
-  if (!apiData.parse || !apiData.parse.text || !apiData.parse.text["*"]) {
-    throw new Error("Wiki API hat keinen nutzbaren Inhalt geliefert.");
-  }
-
-  return apiData.parse.text["*"];
+  return data.parse.text["*"];
 }
 
 async function main() {
@@ -302,76 +320,111 @@ async function main() {
     return;
   }
 
-  const berlin = getBerlinDateParts();
-  const state = readState();
-
   const html = await loadWikiHtml();
   const $ = cheerio.load(html);
 
-  const currentChallengeName = findCurrentChallengeName($);
-  const challengeTables = getChallengeTables($);
+  const currentChallengeName =
+    findCurrentChallengeName($);
+
+  const challengeTables =
+    getChallengeTables($);
 
   if (!currentChallengeName) {
-    throw new Error("Aktuelle Challenge konnte nicht erkannt werden.");
+    throw new Error(
+      "Die aktuelle Challenge konnte nicht erkannt werden."
+    );
   }
 
-  if (challengeTables.length < 1) {
-    throw new Error("Keine Challenge-Tabelle gefunden.");
+  if (challengeTables.length === 0) {
+    throw new Error(
+      "Es wurde keine Challenge-Tabelle gefunden."
+    );
   }
 
-  const standardChallenges = extractStandardChallenges($, challengeTables[0]);
+  const standardChallenges =
+    extractStandardChallenges($, challengeTables[0]);
+
   const specialChallenges = challengeTables[1]
     ? extractSpecialChallenges($, challengeTables[1])
     : [];
 
   if (standardChallenges.length === 0) {
-    throw new Error("Keine Standard Challenges gefunden.");
+    throw new Error(
+      "Es wurden keine Standard-Challenges gefunden."
+    );
   }
 
   for (const challenge of standardChallenges) {
     challenge.isCurrent =
-      challenge.challenge.toLowerCase() === currentChallengeName.toLowerCase();
+      challenge.challenge.toLowerCase() ===
+      currentChallengeName.toLowerCase();
   }
 
   const currentChallenge =
-    standardChallenges.find(challenge => challenge.isCurrent) || standardChallenges[0];
+    standardChallenges.find(
+      challenge => challenge.isCurrent
+    );
 
-  const postKey = `${berlin.dateKey}:${currentChallenge.challenge}`;
-
-  if (!isManualRun && state.lastAutomaticPostKey === postKey) {
-    console.log(`Heute wurde bereits automatisch gepostet: ${postKey}`);
-    return;
+  if (!currentChallenge) {
+    throw new Error(
+      `Die aktuelle Challenge "${currentChallengeName}" ` +
+      "wurde nicht in der Rotation gefunden."
+    );
   }
 
-  const germanCurrentName = await translateToGerman(currentChallenge.challenge);
-  const germanCurrentDescription = await translateToGerman(currentChallenge.description);
-  const germanCurrentDetails = await translateToGerman(currentChallenge.details);
+  const germanCurrentName =
+    await translateToGerman(currentChallenge.challenge);
 
-  const rotationLines = await buildRotationList(standardChallenges);
-  const rotationChunks = splitIntoChunks(rotationLines, 13);
+  const germanCurrentDescription =
+    await translateToGerman(currentChallenge.description);
 
-  const specialLines = await buildSpecialList(specialChallenges);
-  const specialChunks = splitIntoChunks(specialLines, 8);
+  const germanCurrentDetails =
+    await translateToGerman(currentChallenge.details);
 
-  const nowGerman = new Date().toLocaleString("de-DE", {
-    timeZone: "Europe/Berlin",
-    dateStyle: "full",
-    timeStyle: "short"
-  });
+  const rotationLines =
+    await buildRotationList(standardChallenges);
+
+  const rotationChunks =
+    splitIntoChunks(rotationLines, 13);
+
+  const specialLines =
+    await buildSpecialList(specialChallenges);
+
+  const specialChunks =
+    splitIntoChunks(specialLines, 8);
+
+  const germanPostTime = new Date().toLocaleString(
+    "de-DE",
+    {
+      timeZone: "Europe/Berlin",
+      dateStyle: "full",
+      timeStyle: "short"
+    }
+  );
 
   const embeds = [
     {
-      title: `👻 Aktuelle Weekly Challenge: ${truncate(germanCurrentName, 180)}`,
+      title:
+        `👻 Aktuelle Weekly Challenge: ` +
+        truncate(germanCurrentName, 180),
+
       url: WIKI_URL,
+
       description:
-        `🔥 **Diese Aufgabe ist diese Woche dran!**\n\n` +
+        "🔥 **Diese Aufgabe ist diese Woche dran!**\n\n" +
         `**${truncate(germanCurrentDescription, 500)}**\n\n` +
-        `🎯 Schließt die wöchentliche Challenge im Challenge Mode auf der angegebenen Map ab.`,
+        "🎯 Schließt die wöchentliche Challenge im " +
+        "Challenge Mode auf der angegebenen Map ab.",
+
       color: 0x7b2cff,
+
       fields: [
         {
           name: "🧾 Originalname",
-          value: truncate(currentChallenge.challenge, 250),
+          value: truncate(
+            currentChallenge.challenge,
+            250
+          ),
           inline: true
         },
         {
@@ -386,12 +439,19 @@ async function main() {
         },
         {
           name: "📋 Details",
-          value: truncate(germanCurrentDetails || "Keine zusätzlichen Details gefunden.", 950),
+          value: truncate(
+            germanCurrentDetails ||
+              "Keine zusätzlichen Details gefunden.",
+            950
+          ),
           inline: false
         }
       ],
+
       footer: {
-        text: `Automatisch ausgelesen und übersetzt • ${nowGerman}`
+        text:
+          `Automatisch ausgelesen und übersetzt • ` +
+          germanPostTime
       }
     }
   ];
@@ -401,7 +461,8 @@ async function main() {
       title:
         index === 0
           ? "📜 Komplette 26er Standard-Challenge-Rotation"
-          : "📜 Standard-Challenge-Rotation Fortsetzung",
+          : "📜 Standard-Challenge-Rotation – Fortsetzung",
+
       description: chunk.join("\n"),
       color: 0x2f80ed
     });
@@ -412,7 +473,8 @@ async function main() {
       title:
         index === 0
           ? "🎃 Special Challenges"
-          : "🎃 Special Challenges Fortsetzung",
+          : "🎃 Special Challenges – Fortsetzung",
+
       description: chunk.join("\n"),
       color: 0xff8c00
     });
@@ -420,16 +482,21 @@ async function main() {
 
   embeds.push({
     title: "🔗 Quelle",
-    description: `[Phasmophobia Wiki öffnen](${WIKI_URL})`,
+    description:
+      `[Phasmophobia Wiki öffnen](${WIKI_URL})`,
     color: 0x444444
   });
 
   const payload = {
     username: "Phasmo Weekly",
+
     content:
       "👻 **Phasmophobia Weekly Challenge Update**\n" +
-      "Oben steht die aktuelle Wochenaufgabe, darunter die komplette 26er-Rotation.",
+      "Oben steht die aktuelle Wochenaufgabe. " +
+      "Darunter findest du die komplette 26er-Rotation.",
+
     embeds: embeds.slice(0, 10),
+
     allowed_mentions: {
       parse: []
     }
@@ -437,28 +504,27 @@ async function main() {
 
   const discordResponse = await fetch(webhookUrl, {
     method: "POST",
+
     headers: {
       "Content-Type": "application/json"
     },
+
     body: JSON.stringify(payload)
   });
 
   if (!discordResponse.ok) {
-    const errorText = await discordResponse.text();
-    throw new Error(`Discord Fehler: ${discordResponse.status} ${errorText}`);
-  }
+    const errorText =
+      await discordResponse.text();
 
-  if (!isManualRun) {
-    writeState({
-      lastAutomaticPostKey: postKey,
-      lastAutomaticChallenge: currentChallenge.challenge,
-      lastAutomaticPostAtGerman: nowGerman,
-      lastAutomaticPostAtIso: new Date().toISOString()
-    });
+    throw new Error(
+      `Discord-Fehler: ${discordResponse.status} ${errorText}`
+    );
   }
 
   console.log(
-    `Gepostet: Aktuell ${currentChallenge.challenge}, insgesamt ${standardChallenges.length} Standard Challenges, ${specialChallenges.length} Special Challenges.`
+    `Erfolgreich gepostet: ${currentChallenge.challenge}. ` +
+    `${standardChallenges.length} Standard-Challenges und ` +
+    `${specialChallenges.length} Special-Challenges gefunden.`
   );
 }
 
